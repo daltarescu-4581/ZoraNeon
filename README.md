@@ -50,66 +50,67 @@ the open door is expected.
 
 ## 1. Frigate configuration (your side)
 
-Add the zone and make sure clips are being recorded for the camera. In
-`config.yml`:
+Ready-to-edit files live in [`frigate/`](frigate/): a `docker-compose.yml`
+(Frigate plus a Mosquitto broker, since Frigate does not ship one) and a
+`config.yml` for the fridge camera.
 
-```yaml
-mqtt:
-  enabled: true
-  host: 192.168.1.50      # same broker this service connects to
-  port: 1883
+On the machine that will watch the fridge — a Pi, a mini PC, anything that
+stays awake:
 
-cameras:
-  fridge:                  # this name goes in FRIGATE_CAMERA_NAME
-    ffmpeg:
-      inputs:
-        - path: rtsp://user:password@192.168.1.60:554/h264Preview_01_main
-          roles: [detect, record]
-
-    detect:
-      width: 1280
-      height: 720
-      fps: 5
-
-    zones:
-      fridge_door:         # this name goes in ZONE_NAME
-        # Polygon covering the fridge door opening, as x,y pairs in detect
-        # resolution. Draw it in the Frigate UI (Settings -> Mask & Zone
-        # Editor) and paste the result — hand-written coordinates are never
-        # right the first time.
-        coordinates: 0.35,0.12,0.72,0.12,0.72,0.58,0.35,0.58
-
-    record:
-      enabled: true
-      retain:
-        days: 3
-        mode: motion
-      # Clips must exist for events, or there is nothing to download.
-      alerts:
-        retain:
-          days: 7
-      detections:
-        retain:
-          days: 7
-
-    objects:
-      track:
-        - person
-
-    # Motion mode (see below) needs continuous recording rather than
-    # event-only recording:
-    # motion:
-    #   threshold: 30
-    #   contour_area: 10
+```bash
+cd frigate
+cp .env.example .env          # camera password goes here, not in config.yml
+$EDITOR config.yml            # camera IP + Reolink username, in both paths
+docker compose up -d
+docker compose logs -f frigate
 ```
 
-Draw `fridge_door` generously: it should cover the door opening **and a hand's
-width of the counter in front of it**, otherwise items get their "near the
-door" frames clipped off and the trajectory looks flat.
+Open `http://<that machine>:8971` and confirm you can see the camera.
+
+### Getting the Reolink stream
+
+Reolink exposes two streams, and Frigate wants both:
+
+```
+rtsp://USER:PASSWORD@<camera-ip>:554/h264Preview_01_main   # recorded -> our frames
+rtsp://USER:PASSWORD@<camera-ip>:554/h264Preview_01_sub    # motion detection only
+```
+
+Use `h265Preview_01_main` if the camera records in H.265; the sub stream
+usually stays H.264 either way.
+
+Before configuring anything, prove the stream plays — `ffplay "rtsp://…"` or
+VLC's Open Network Stream. Nothing downstream can work until it does.
+
+Four things that reliably go wrong:
+
+- **RTSP is disabled by default** on recent Reolink firmware. Turn it on under
+  Settings → Network → Advanced → Port Settings.
+- **Give the camera a DHCP reservation.** If its IP changes, Frigate stops
+  seeing it and says nothing useful about why.
+- **Use a letters-and-numbers password.** Special characters have to be
+  URL-encoded inside an RTSP address and it is miserable to debug.
+- **Make a separate Reolink user** for Frigate rather than reusing admin.
+
+Detection quality note: the sub stream only answers "did something move?".
+The frames Claude actually sees are cut from the recorded main stream, so a
+grainy sub stream does not hurt item identification.
+
+### Drawing the zone
+
+The one thing that cannot be copied from a file. In the Frigate UI:
+**Settings → Mask & Zone Editor → Zones**, draw a polygon named
+`fridge_door`, and paste the coordinates it produces into `config.yml`.
+
+Draw it over the door opening **plus roughly a hand's width of counter in
+front of it**. Too tight and an item's "near the door" frames get clipped
+off, which flattens the trajectory and leaves the model nothing to measure
+direction against.
 
 ### Two trigger modes
 
-`TRIGGER_MODE` switches between them with no code change.
+`TRIGGER_MODE` switches fridge-watcher between two ways of noticing that
+something happened, with no code change.
 
 **`events` (default)** — subscribes to `frigate/events` and acts on
 `type == "end"` when `after.entered_zones` contains your `ZONE_NAME`. Clean,
@@ -129,6 +130,16 @@ and seeing nothing in the log, switch to `motion`.
 Motion windows shorter than 1s are ignored and windows longer than 45s are
 clamped to their last 45s (constants in `config.py` — they describe fridge
 physics rather than a deployment choice).
+
+Two things to check before switching to motion mode:
+
+- **Draw a motion mask** over anything that moves but is not somebody at the
+  fridge — a window, a doorway, a TV. In events mode a stray trigger is
+  filtered out by the zone; in motion mode it becomes a Claude API call.
+- **Recordings must still cover the window.** `frigate/config.yml` uses
+  `record.retain.mode: motion`, which keeps exactly the segments motion mode
+  asks for. If clip downloads start failing on windows you know happened,
+  switch that to `all` and give it more disk.
 
 ---
 
@@ -361,10 +372,16 @@ arithmetic in ffmpeg. See the module docstring for the full reasoning.
 
 ## 8. Troubleshooting
 
-**Nothing happens when I open the fridge.** Check the log for
-`event_outside_zone` — the event fired but your polygon did not cover where the
-action was. If there is no log line at all, Frigate never detected a person:
-switch to `TRIGGER_MODE=motion`.
+**Nothing happens when I open the fridge.** Re-run with
+`--log-level DEBUG` and look for `event_outside_zone`: that means the event
+fired but your polygon did not cover where the action was, so redraw the zone
+wider. If there is no line at all even at DEBUG, Frigate never detected a
+person — switch to `TRIGGER_MODE=motion`.
+
+**Frigate itself sees nothing.** Check the camera before the code: does the
+Debug view in the Frigate UI show motion boxes when you open the fridge? If
+not, the problem is the stream or the motion threshold, and nothing in
+fridge-watcher will help.
 
 **`clip_retry` then `ClipUnavailable`.** Frigate had not finished writing the
 mp4. The service retries 5 times with exponential backoff; if it still fails,

@@ -1,0 +1,115 @@
+# Frigate configuration for the fridge camera.
+#
+# Three things must be edited before this will start:
+#   1. the camera IP in both `path:` lines
+#   2. the Reolink username in both `path:` lines
+#   3. the fridge_door zone coordinates (draw them in the UI -- see below)
+#
+# Frigate validates this file on startup and names the exact key it dislikes,
+# so if a key below has been renamed in a newer release, the container log
+# will tell you which one.
+
+mqtt:
+  enabled: true
+  host: mqtt          # the mosquitto service in docker-compose.yml
+  port: 1883
+
+detectors:
+  # CPU detection is normally discouraged, but this install watches one camera
+  # at 5fps for one object type. It is also only used in TRIGGER_MODE=events:
+  # motion mode never invokes the detector at all. Add a Coral later if you
+  # settle on events mode and see detection falling behind.
+  cpu1:
+    type: cpu
+
+cameras:
+  fridge:                       # <- this name goes in FRIGATE_CAMERA_NAME
+    ffmpeg:
+      # Uncomment the line matching your hardware. Both are Frigate presets;
+      # if the container rejects one, delete it -- software decoding is fine
+      # for a single camera.
+      # hwaccel_args: preset-vaapi         # Intel / AMD mini PC
+      # hwaccel_args: preset-rpi-64-h264   # Raspberry Pi 4 / 5
+
+      inputs:
+        # Low-res stream, used only to notice that something moved.
+        - path: rtsp://frigate:{FRIGATE_RTSP_PASSWORD}@192.168.1.60:554/h264Preview_01_sub
+          roles:
+            - detect
+
+        # Full-res stream. This is what gets recorded, and therefore what
+        # fridge-watcher's frames are cut from -- item identification quality
+        # comes from this stream, not the one above.
+        - path: rtsp://frigate:{FRIGATE_RTSP_PASSWORD}@192.168.1.60:554/h264Preview_01_main
+          roles:
+            - record
+
+    detect:
+      enabled: true
+      # 5fps is plenty. Somebody reaching into a fridge is not a fast event,
+      # and higher rates just cost CPU.
+      fps: 5
+
+    zones:
+      # THIS IS THE IMPORTANT ONE. fridge-watcher only acts on events that
+      # entered this zone, and the name must match ZONE_NAME in its .env.
+      #
+      # Do not hand-write these numbers. Open the Frigate UI, go to
+      # Settings -> Mask & Zone Editor -> Zones, draw the polygon, and paste
+      # what it gives you here.
+      #
+      # Draw it over the fridge door opening PLUS roughly a hand's width of
+      # counter in front of it. Too tight and an item's "near the door" frames
+      # get clipped off, which flattens the trajectory and makes direction
+      # unreadable.
+      fridge_door:
+        coordinates: 0.35,0.12,0.72,0.12,0.72,0.58,0.35,0.58
+
+    motion:
+      # Raise threshold if the camera triggers on shadows or a flickering
+      # light; lower it if slow reaches go unnoticed. Tune from the Debug
+      # view in the UI, which draws the motion boxes live.
+      threshold: 30
+      contour_area: 10
+      # Mask out anything that moves but is not somebody at the fridge -- a
+      # window, a doorway, a TV, a hallway. This matters far more in
+      # TRIGGER_MODE=motion, where every twitch becomes a Claude API call.
+      # Draw it in the same Mask & Zone Editor.
+      # mask: 0.0,0.0,0.3,0.0,0.3,0.2,0.0,0.2
+
+    objects:
+      track:
+        - person
+
+    record:
+      enabled: true
+      retain:
+        days: 3
+        # `motion` keeps only segments where something moved, which is almost
+        # nothing for a fridge camera and saves an enormous amount of disk.
+        # Switch to `all` if TRIGGER_MODE=motion ever asks for a window that
+        # has been trimmed away -- you will see it as a failed clip download.
+        mode: motion
+      alerts:
+        retain:
+          days: 14
+      detections:
+        retain:
+          days: 14
+
+    snapshots:
+      enabled: true
+      retain:
+        default: 14
+
+# Optional: restream through go2rtc so the camera only ever holds one RTSP
+# connection. Reolink firmware is not always happy with several at once -- if
+# streams drop or stutter, enable this and change the two `path:` lines above
+# to rtsp://127.0.0.1:8554/fridge and .../fridge_sub.
+#
+# go2rtc:
+#   streams:
+#     fridge:
+#       - rtsp://frigate:{FRIGATE_RTSP_PASSWORD}@192.168.1.60:554/h264Preview_01_main
+#     fridge_sub:
+#       - rtsp://frigate:{FRIGATE_RTSP_PASSWORD}@192.168.1.60:554/h264Preview_01_sub
