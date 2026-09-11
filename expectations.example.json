@@ -1,0 +1,18 @@
+{
+  "1727213456.123456-abc12d": {
+    "item": "oat milk carton",
+    "direction": "OUT",
+    "quantity": 1,
+    "aliases": ["oat milk", "carton of oat milk"]
+  },
+  "1727214012.987654-ef34gh": {
+    "item": "leftovers container",
+    "direction": "IN",
+    "quantity": 1,
+    "aliases": ["tupperware", "food container"]
+  },
+  "motion-fridge-1727215000": {
+    "item": null,
+    "direction": "NO_ITEM"
+  }
+}
