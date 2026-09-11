@@ -1,0 +1,13 @@
+.git/
+.venv/
+venv/
+captures/
+frigate/storage/
+tests/
+migrations/
+.env
+*.mp4
+*.mov
+__pycache__/
+*.py[cod]
+.pytest_cache/

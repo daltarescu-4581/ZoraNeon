@@ -96,11 +96,42 @@ class FrigateListener:
                 "trigger_mode": self._config.trigger_mode.value,
             },
         )
-        self._client.connect(self._config.mqtt_host, self._config.mqtt_port, keepalive=60)
+        self._connect_with_retry()
         try:
             self._client.loop_forever()
         finally:
             self.stop()
+
+    def _connect_with_retry(self) -> None:
+        """Wait for the broker rather than dying if it is not up yet.
+
+        Under docker compose this service and Mosquitto start together, so the
+        first connect routinely lands before the broker is listening. paho only
+        reconnects on its own after one successful connection, so the very
+        first one is ours to retry.
+        """
+        delay = RECONNECT_MIN_DELAY
+        attempt = 0
+        while not self._stop.is_set():
+            attempt += 1
+            try:
+                self._client.connect(
+                    self._config.mqtt_host, self._config.mqtt_port, keepalive=60
+                )
+                return
+            except OSError as exc:
+                log.warning(
+                    "mqtt_connect_retry",
+                    extra={
+                        "host": self._config.mqtt_host,
+                        "port": self._config.mqtt_port,
+                        "attempt": attempt,
+                        "delay": delay,
+                        "error": f"{type(exc).__name__}: {exc}",
+                    },
+                )
+                self._stop.wait(delay)
+                delay = min(delay * 2, RECONNECT_MAX_DELAY)
 
     def stop(self) -> None:
         if self._stop.is_set():

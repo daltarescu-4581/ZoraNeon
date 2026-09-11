@@ -1,0 +1,96 @@
+# Everything that watches the fridge, on one box.
+#
+#   cp .env.example .env     # fill it in
+#   docker compose up -d
+#   docker compose logs -f fridge-watcher
+#
+# Runs the same on a Mac Mini, a mini PC or a Pi. The only per-host difference
+# is the hardware-acceleration block on the frigate service -- see the notes
+# there.
+
+services:
+  # ---------------------------------------------------------------------
+  # Frigate: talks RTSP to the Reolink, records clips, publishes events.
+  # ---------------------------------------------------------------------
+  frigate:
+    container_name: frigate
+    image: ghcr.io/blakeblackshear/frigate:stable
+    restart: unless-stopped
+    # Frigate writes decoded frames to shared memory. One camera at sub-stream
+    # resolution needs only a few MB; this is deliberately generous.
+    shm_size: "128mb"
+
+    # --- Hardware video decoding ---------------------------------------
+    # On Linux with Intel/AMD graphics, uncomment this to hand the GPU to
+    # Frigate, and set `hwaccel_args: preset-vaapi` in frigate/config.yml.
+    #
+    # On macOS, DELETE nothing and add nothing: Docker runs containers inside a
+    # Linux VM that cannot see /dev/dri or VideoToolbox, so decoding is done on
+    # the CPU no matter what. That is fine for one camera -- recording is a
+    # stream copy, and only the small detect stream is actually decoded.
+    # devices:
+    #   - /dev/dri/renderD128
+    #   - /dev/bus/usb:/dev/bus/usb   # USB Coral, Linux hosts only
+
+    volumes:
+      - /etc/localtime:/etc/localtime:ro
+      - ./frigate/config.yml:/config/config.yml:ro
+      # Recordings. On a Pi, point this at an SSD -- continuous video writes
+      # will kill an SD card. On a Mac Mini the internal SSD is fine.
+      - ./frigate/storage:/media/frigate
+      - type: tmpfs
+        target: /tmp/cache
+        tmpfs:
+          size: 1000000000
+    ports:
+      # 8971: the web UI, with a login. This is the one you open in a browser.
+      - "8971:8971"
+      # 5000: the same API without authentication, which is what
+      # fridge-watcher uses. No login, so keep it on your LAN and never
+      # forward it through your router.
+      - "5000:5000"
+      - "8554:8554"       # go2rtc RTSP restream
+      - "8555:8555/tcp"   # WebRTC
+      - "8555:8555/udp"
+    environment:
+      # From .env -- keeps the camera password out of config.yml and git.
+      FRIGATE_RTSP_PASSWORD: "${FRIGATE_RTSP_PASSWORD}"
+
+  # ---------------------------------------------------------------------
+  # Mosquitto: the message broker. Frigate does not ship one and
+  # fridge-watcher needs one, so it lives here.
+  # ---------------------------------------------------------------------
+  mqtt:
+    container_name: mosquitto
+    image: eclipse-mosquitto:2
+    restart: unless-stopped
+    # Anonymous access, fine on a trusted home LAN. To require a login, mount
+    # your own mosquitto.conf and set MQTT_USER / MQTT_PASSWORD in .env.
+    command: mosquitto -c /mosquitto-no-auth.conf
+    ports:
+      - "1883:1883"
+
+  # ---------------------------------------------------------------------
+  # The service in this repo.
+  # ---------------------------------------------------------------------
+  fridge-watcher:
+    container_name: fridge-watcher
+    build: .
+    restart: unless-stopped
+    depends_on:
+      - frigate
+      - mqtt
+    env_file: .env
+    environment:
+      # Inside the compose network the other two are reachable by service
+      # name, so these are set here rather than in .env -- it saves hard-coding
+      # this machine's LAN address, and it overrides .env if you also set them
+      # there for running the CLI outside Docker.
+      FRIGATE_URL: http://frigate:5000
+      MQTT_HOST: mqtt
+      MQTT_PORT: "1883"
+      CAPTURES_DIR: /captures
+    volumes:
+      # Frames and verdicts land on the host, so `replay-all` can score them
+      # later without going into the container.
+      - ./captures:/captures

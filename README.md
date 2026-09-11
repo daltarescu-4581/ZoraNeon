@@ -50,22 +50,65 @@ the open door is expected.
 
 ## 1. Frigate configuration (your side)
 
-Ready-to-edit files live in [`frigate/`](frigate/): a `docker-compose.yml`
-(Frigate plus a Mosquitto broker, since Frigate does not ship one) and a
-`config.yml` for the fridge camera.
-
-On the machine that will watch the fridge — a Pi, a mini PC, anything that
-stays awake:
+Everything runs on one always-on machine — a Mac Mini, a mini PC, a Pi. The
+repo root has a `docker-compose.yml` that brings up all three pieces (Frigate,
+a Mosquitto broker, and this service) and `frigate/config.yml` for the camera.
 
 ```bash
-cd frigate
-cp .env.example .env          # camera password goes here, not in config.yml
-$EDITOR config.yml            # camera IP + Reolink username, in both paths
+git clone https://github.com/daltarescu-4581/ZoraNeon.git
+cd ZoraNeon
+cp .env.example .env          # camera password, API keys
+$EDITOR frigate/config.yml    # camera IP + Reolink username, in both paths
 docker compose up -d
-docker compose logs -f frigate
+docker compose logs -f
 ```
 
 Open `http://<that machine>:8971` and confirm you can see the camera.
+
+Inside the compose network the three containers find each other by name, so
+`FRIGATE_URL` and `MQTT_HOST` are set for you and the values in `.env` are
+only used when running the CLI outside Docker.
+
+### Running it on a Mac (Mac Mini, iMac, anything always-on)
+
+Works well, with three differences from Linux:
+
+**No hardware video decoding.** Docker on macOS runs containers inside a Linux
+VM that cannot see VideoToolbox, so ffmpeg decodes on the CPU. For one camera
+this barely matters: recording the main stream is a stream copy (no decoding
+at all), and only the small detect stream is actually decoded. Leave the
+`devices:` block in `docker-compose.yml` commented out — `/dev/dri` does not
+exist on a Mac and will stop the container from starting.
+
+**No Coral TPU.** USB passthrough into the Docker VM is not supported on
+macOS. Not a problem here: one camera at 5fps on the CPU detector is fine, and
+`TRIGGER_MODE=motion` skips the detector entirely.
+
+**The Mac will fall asleep and stop watching your fridge.** This is the one
+that actually bites. Turn sleep off:
+
+```bash
+sudo pmset -a sleep 0 displaysleep 0 disksleep 0
+sudo pmset -a autorestart 1      # come back after a power cut
+sudo pmset -a womp 1             # wake for network access
+pmset -g                         # confirm: sleep should read 0
+```
+
+Then make sure Docker itself comes back after a reboot. Docker Desktop needs a
+logged-in desktop session, which means enabling automatic login
+(System Settings → Users & Groups → Automatically log in as). If you would
+rather not do that, [Colima](https://github.com/abiosoft/colima) is a headless
+Docker runtime that starts without a GUI session:
+
+```bash
+brew install colima docker docker-compose
+colima start --cpu 2 --memory 4 --disk 60
+brew services start colima        # survives reboot, no auto-login needed
+```
+
+One networking note: the camera streams continuously, so put the Mac on
+**wired ethernet** if you can. Continuous RTSP over marginal Wi-Fi shows up as
+corrupted clips and confusing model output rather than as an obvious failure.
 
 ### Getting the Reolink stream
 
@@ -178,27 +221,45 @@ never saw go in is a gap in our history, not a negative fridge.
 
 ---
 
-## 3. Install and run
+## 3. Running it
+
+Under docker compose (section 1) the service is already running — that is the
+normal deployment. Useful commands:
 
 ```bash
-python -m venv .venv && source .venv/bin/activate
+docker compose logs -f fridge-watcher
+docker compose restart fridge-watcher      # after editing .env
+docker compose up -d --build               # after changing the code
+```
+
+Logs are JSON lines on stdout, one object per line, so they pipe into `jq`:
+
+```bash
+docker compose logs -f fridge-watcher | jq -c 'select(.msg=="inventory_write")'
+```
+
+### Outside Docker
+
+You need this on a laptop to use `replay` and `replay-all`, and it is also a
+perfectly good way to run the service itself:
+
+```bash
+python3 -m venv .venv && source .venv/bin/activate
 pip install -r requirements.txt
 
 cp .env.example .env
-$EDITOR .env          # Frigate URL, MQTT, Anthropic key, Supabase key
+$EDITOR .env          # here FRIGATE_URL and MQTT_HOST do matter -- point
+                      # them at the machine running Frigate
 
 python -m fridge_watcher run
 ```
 
-Logs are JSON lines on stdout, one object per line, so this runs cleanly under
-systemd or Docker:
-
-```bash
-python -m fridge_watcher run 2>&1 | jq -c 'select(.msg=="inventory_write")'
-journalctl -u fridge-watcher -o cat | jq .
-```
+On macOS the command is `python3` until the venv is activated; afterwards
+plain `python` works.
 
 ### systemd
+
+For a Linux host running the service natively rather than in a container:
 
 ```ini
 [Unit]
@@ -214,6 +275,10 @@ RestartSec=5
 
 [Install]
 WantedBy=multi-user.target
+```
+
+```bash
+journalctl -u fridge-watcher -o cat | jq .
 ```
 
 ---
@@ -362,6 +427,9 @@ handy when you are deciding which mode your camera needs.
 | `pipeline.py` | Ties it together; shared by live, `replay` and `replay-all`. |
 | `evaluate.py` | Scoring for `replay-all`. |
 | `cli.py` | Argument parsing and output. |
+
+Deployment lives in `docker-compose.yml` (all three services), `Dockerfile`
+(this service) and `frigate/config.yml` (the camera).
 
 Frame extraction uses OpenCV (`opencv-python-headless`) rather than ffmpeg: one pip install with no system
 binary to provision, frames come back as arrays we JPEG-encode in process, and

@@ -154,3 +154,38 @@ def test_long_motion_window_is_clamped(motion_listener: FrigateListener, monkeyp
 def test_motion_off_without_on_is_ignored(motion_listener: FrigateListener):
     motion_listener._on_message(None, None, Message("OFF", "frigate/fridge/motion"))
     assert motion_listener._queue.empty()
+
+
+# -- startup ordering -------------------------------------------------------
+
+
+def test_waits_for_a_broker_that_is_not_up_yet(config: Config, monkeypatch):
+    """Under compose, this service starts before Mosquitto is listening."""
+    listener = FrigateListener(config, handler=lambda _t: None)
+    attempts = []
+
+    def flaky_connect(host, port, keepalive=60):
+        attempts.append(host)
+        if len(attempts) < 3:
+            raise ConnectionRefusedError(61, "Connection refused")
+
+    monkeypatch.setattr(listener._client, "connect", flaky_connect)
+    monkeypatch.setattr(listener._stop, "wait", lambda _delay: None)
+
+    listener._connect_with_retry()
+
+    assert len(attempts) == 3  # two refusals, then success
+
+
+def test_connect_retry_gives_up_when_told_to_stop(config: Config, monkeypatch):
+    listener = FrigateListener(config, handler=lambda _t: None)
+
+    def always_refused(host, port, keepalive=60):
+        raise ConnectionRefusedError(61, "Connection refused")
+
+    monkeypatch.setattr(listener._client, "connect", always_refused)
+    monkeypatch.setattr(listener._stop, "wait", lambda _delay: listener._stop.set())
+
+    listener._connect_with_retry()  # returns instead of looping forever
+
+    assert listener._stop.is_set()

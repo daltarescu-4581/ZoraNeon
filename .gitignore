@@ -9,5 +9,4 @@ captures/
 *.egg-info/
 dist/
 build/
-frigate/.env
 frigate/storage/
